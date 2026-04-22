@@ -72,7 +72,7 @@ async function main() {
   if (aiReply) {
     const cmd = `gh issue comment ${issueNumber} --body "@${commentAuthor} ${aiReply}"`;
     console.log('Executing:', cmd);
-    execSync(cmd, { env: { ...process.env, GITHUB_TOKEN: process.env.GH_TOKEN } });
+    execSync(cmd, { env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN } });
     console.log('Reply posted!');
   }
 }
