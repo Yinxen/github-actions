@@ -1,0 +1,54 @@
+name: AI Issue Reply
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  ai-reply:
+    if: ${{ contains(github.event.comment.body, '/ai') && !github.event.issue.pull_request }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get issue content
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          ISSUE_TITLE=$(gh issue view $ISSUE_NUMBER --json title -q '.title')
+          ISSUE_BODY=$(gh issue view $ISSUE_NUMBER --json body -q '.body')
+          echo "ISSUE_TITLE=$ISSUE_TITLE" >> $GITHUB_ENV
+          echo "ISSUE_BODY=$ISSUE_BODY" >> $GITHUB_ENV
+
+      - name: Call OpenRouter API
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          ISSUE_TITLE: ${{ env.ISSUE_TITLE }}
+          ISSUE_BODY: ${{ env.ISSUE_BODY }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
+            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+            -H "Content-Type: application/json" \
+            -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
+            -H "X-Title: AI Issue Reply" \
+            -d '{
+              "models": ["free"],
+              "messages": [
+                {"role": "system", "content": "You are a helpful assistant that helps answer GitHub issue questions. Keep responses concise and helpful."},
+                {"role": "user", "content": "Issue Title: '"$ISSUE_TITLE"'\n\nIssue Body:\n'"$ISSUE_BODY"'\n\nUser Question:\n'"$COMMENT_BODY"'"}
+              ]
+            }')
+
+          AI_REPLY=$(echo $RESPONSE | jq -r '.choices[0].message.content')
+          echo "AI_REPLY=$AI_REPLY" >> $GITHUB_ENV
+
+      - name: Reply to issue
+        if: ${{ env.AI_REPLY != '' && env.AI_REPLY != 'null' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ACTOR: ${{ github.event.comment.user.login }}
+        run: |
+          gh issue comment $ISSUE_NUMBER --body "@$ACTOR $AI_REPLY"
