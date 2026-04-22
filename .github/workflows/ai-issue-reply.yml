@@ -13,10 +13,7 @@ jobs:
     if: ${{ github.event.issue }}
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Get issue content
+      - name: Get issue info
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
@@ -26,79 +23,104 @@ jobs:
           echo "ISSUE_TITLE=$ISSUE_TITLE" >> $GITHUB_ENV
           echo "ISSUE_BODY=$ISSUE_BODY" >> $GITHUB_ENV
 
-      - name: Get issue comments history
+      - name: Get conversation history
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         id: history
         run: |
-          COMMENTS=$(gh issue view $ISSUE_NUMBER --json comments --jq '.comments[] | "**\(.author.login):** \(.body)"' | tac)
-          echo "COMMENTS<<EOF" >> $GITHUB_ENV
-          echo "$COMMENTS" >> $GITHUB_ENV
-          echo "EOF" >> $GITHUB_ENV
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            # For comments, get all previous comments as history
+            gh issue view $ISSUE_NUMBER --json comments --jq '.comments[] | {role: .author.login, content: .body}' > history.json
+          else
+            # For new issues, no history
+            echo "[]" > history.json
+          fi
+          cat history.json
 
-      - name: Get comment info
-        id: comment_info
+      - name: Build conversation
+        id: conversation
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_BODY: ${{ env.ISSUE_BODY }}
         run: |
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            echo "COMMENT_BODY=${{ github.event.comment.body }}" >> $GITHUB_ENV
-            echo "COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
+            # Title is the topic, body is initial context, comments are history
+            python3 << 'PYTHON'
+import json
+import sys
+
+with open('history.json') as f:
+    comments = json.load(f)
+
+messages = []
+messages.append({"role": "system", "content": "You are a helpful AI assistant. The issue title is the topic, issue body provides context, and comments are the conversation history. Keep responses concise and helpful."})
+
+# Build conversation from comments (skip the latest one if it's the trigger)
+history_text = ""
+for c in comments:
+    role = "assistant" if c['role'] == 'github-actions[bot]' else "user"
+    history_text += f"{c['role']}: {c['content']}\n"
+
+# If it's a comment event, include the new comment
+comment_body = """${COMMENT_BODY}"""
+if comment_body:
+    user_input = f"""Issue Title: ${ISSUE_TITLE}
+
+---Conversation History---
+{history_text}
+---
+New message from user: {comment_body}"""
+else:
+    # New issue - use body as user input
+    user_input = f"""Issue Title: ${ISSUE_TITLE}
+
+Issue Body:
+${ISSUE_BODY}"""
+
+messages.append({"role": "user", "content": user_input})
+print(json.dumps(messages))
+PYTHON
           else
-            echo "COMMENT_BODY=" >> $GITHUB_ENV
-            echo "COMMENT_AUTHOR=${{ github.event.issue.user.login }}" >> $GITHUB_ENV
+            # New issue
+            python3 << 'PYTHON'
+import json
+
+messages = []
+messages.append({"role": "system", "content": "You are a helpful AI assistant. Someone just opened an issue. Greet them helpfully and ask for more details if needed."})
+messages.append({"role": "user", "content": f"""Issue Title: ${ISSUE_TITLE}
+
+Issue Body:
+${ISSUE_BODY}"""})
+print(json.dumps(messages))
+PYTHON
           fi
 
       - name: Call OpenRouter API
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ISSUE_TITLE: ${{ env.ISSUE_TITLE }}
-          ISSUE_BODY: ${{ env.ISSUE_BODY }}
-          COMMENT_BODY: ${{ env.COMMENT_BODY }}
-          COMMENT_AUTHOR: ${{ env.COMMENT_AUTHOR }}
-          COMMENTS: ${{ env.COMMENTS }}
+        id: api
         run: |
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            USER_MESSAGE="Issue Title: $ISSUE_TITLE
-
-Issue Body:
-$ISSUE_BODY
-
----Conversation History---
-${COMMENTS}
-
----
-New Comment by $COMMENT_AUTHOR:
-$COMMENT_BODY"
-          else
-            USER_MESSAGE="New Issue by $COMMENT_AUTHOR:
-
-Title: $ISSUE_TITLE
-
-Body:
-$ISSUE_BODY"
-          fi
-
+          MESSAGES=$(cat messages.json)
           RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
             -H "Content-Type: application/json" \
             -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
             -H "X-Title: AI Issue Reply" \
-            -d '{
-              "model": "openrouter/free",
-              "messages": [
-                {"role": "system", "content": "You are a helpful AI assistant that helps answer GitHub issue questions. Provide concise and helpful responses."},
-                {"role": "user", "content": "'"$USER_MESSAGE"'"}
-              ]
-            }')
+            -d "{\"model\": \"openrouter/free\", \"messages\": $MESSAGES}")
 
-          AI_REPLY=$(echo $RESPONSE | jq -r '.choices[0].message.content // empty')
-          echo "AI_REPLY=$AI_REPLY" >> $GITHUB_ENV
+          echo "API_RESPONSE=$RESPONSE" >> $GITHUB_ENV
+          echo "$RESPONSE" | jq .
 
-      - name: Reply to issue
-        if: ${{ env.AI_REPLY != '' && env.AI_REPLY != 'null' && env.AI_REPLY != empty }}
+      - name: Extract and reply
+        if: ${{ success() }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ACTOR: ${{ env.COMMENT_AUTHOR }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
         run: |
-          gh issue comment $ISSUE_NUMBER --body "@$ACTOR $AI_REPLY"
+          AI_REPLY=$(echo "$API_RESPONSE" | jq -r '.choices[0].message.content // empty')
+          if [ -n "$AI_REPLY" ] && [ "$AI_REPLY" != "null" ]; then
+            echo "AI Reply: $AI_REPLY"
+            gh issue comment $ISSUE_NUMBER --body "@$COMMENT_AUTHOR $AI_REPLY"
+          fi
