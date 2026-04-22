@@ -35,4 +35,4 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.repository }}
         run: |
-          node scripts/ai-reply/index.js
+          node scripts/ai-reply/index.cjs
