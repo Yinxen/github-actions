@@ -2,6 +2,8 @@ name: AI Issue Reply
 on:
   issue_comment:
     types: [created]
+  issues:
+    types: [opened]
 
 permissions:
   issues: write
@@ -35,15 +37,47 @@ jobs:
           echo "$COMMENTS" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      - name: Get comment info
+        id: comment_info
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "COMMENT_BODY=${{ github.event.comment.body }}" >> $GITHUB_ENV
+            echo "COMMENT_AUTHOR=${{ github.event.comment.user.login }}" >> $GITHUB_ENV
+          else
+            echo "COMMENT_BODY=" >> $GITHUB_ENV
+            echo "COMMENT_AUTHOR=${{ github.event.issue.user.login }}" >> $GITHUB_ENV
+          fi
+
       - name: Call OpenRouter API
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ISSUE_TITLE: ${{ env.ISSUE_TITLE }}
           ISSUE_BODY: ${{ env.ISSUE_BODY }}
-          COMMENT_BODY: ${{ github.event.comment.body }}
-          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENT_BODY: ${{ env.COMMENT_BODY }}
+          COMMENT_AUTHOR: ${{ env.COMMENT_AUTHOR }}
           COMMENTS: ${{ env.COMMENTS }}
         run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            USER_MESSAGE="Issue Title: $ISSUE_TITLE
+
+Issue Body:
+$ISSUE_BODY
+
+---Conversation History---
+${COMMENTS}
+
+---
+New Comment by $COMMENT_AUTHOR:
+$COMMENT_BODY"
+          else
+            USER_MESSAGE="New Issue by $COMMENT_AUTHOR:
+
+Title: $ISSUE_TITLE
+
+Body:
+$ISSUE_BODY"
+          fi
+
           RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
             -H "Content-Type: application/json" \
@@ -53,7 +87,7 @@ jobs:
               "model": "openrouter/free",
               "messages": [
                 {"role": "system", "content": "You are a helpful AI assistant that helps answer GitHub issue questions. Provide concise and helpful responses."},
-                {"role": "user", "content": "Issue Title: '"$ISSUE_TITLE"'\n\nIssue Body:\n'"$ISSUE_BODY"'\n\n---Conversation History:---\n'"${COMMENTS}"'\n\n---\nNew Comment by '"$COMMENT_AUTHOR"':\n'"$COMMENT_BODY"'"}
+                {"role": "user", "content": "'"$USER_MESSAGE"'"}
               ]
             }')
 
@@ -65,6 +99,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ACTOR: ${{ github.event.comment.user.login }}
+          ACTOR: ${{ env.COMMENT_AUTHOR }}
         run: |
           gh issue comment $ISSUE_NUMBER --body "@$ACTOR $AI_REPLY"
