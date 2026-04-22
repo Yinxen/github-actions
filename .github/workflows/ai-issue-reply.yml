@@ -13,70 +13,102 @@ jobs:
     if: ${{ github.event.issue }}
     runs-on: ubuntu-latest
     steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
       - name: Get issue info
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
           gh issue view $ISSUE_NUMBER --json title,body,comments > issue.json
-          echo "ISSUE_NUMBER=$ISSUE_NUMBER" >> $GITHUB_ENV
+          cat $GITHUB_EVENT_PATH > event.json
 
       - name: Call OpenRouter API
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          REPO: ${{ github.repository }}
         run: |
-          if [ "${{ github.event_name }}" = "issue_comment" ]; then
-            COMMENT_BODY="${{ github.event.comment.body }}"
-            COMMENT_AUTHOR="${{ github.event.comment.user.login }}"
-            jq -n \
-              --arg title "$(jq -r '.title' issue.json)" \
-              --arg body "$(jq -r '.body // empty' issue.json)" \
-              --arg comments "$(jq -r '.comments[] | "**\(.author.login):** \(.body)"' issue.json)" \
-              --arg new_comment "$COMMENT_BODY" \
-              --arg new_author "$COMMENT_AUTHOR" \
-              '{
-                model: "openrouter/free",
-                messages: [
-                  {role: "system", content: "You are a helpful AI assistant. Issue title is the topic, body is context, comments are conversation history."},
-                  {role: "user", content: "Issue Title: \($title)\n\n---Conversation History---\n\($comments)\n\n---\nNew message from \($new_author): \($new_comment)"}
-                ]
-              }' > request.json
-          else
-            COMMENT_AUTHOR="${{ github.event.issue.user.login }}"
-            jq -n \
-              --arg title "$(jq -r '.title' issue.json)" \
-              --arg body "$(jq -r '.body // empty' issue.json)" \
-              --arg author "$COMMENT_AUTHOR" \
-              '{
-                model: "openrouter/free",
-                messages: [
-                  {role: "system", content: "You are a helpful AI assistant. Someone opened an issue. Greet them and ask for clarification if needed."},
-                  {role: "user", content: "New issue by \($author):\nTitle: \($title)\n\n\($body)"}
-                ]
-              }' > request.json
-          fi
+          cat << 'EOF' > index.js
+const https = require('https');
+const fs = require('fs');
 
-          cat request.json
+const issueData = JSON.parse(fs.readFileSync('./issue.json', 'utf8'));
+const eventData = JSON.parse(fs.readFileSync('./event.json', 'utf8'));
+const issueNumber = process.env.ISSUE_NUMBER;
+const repo = process.env.REPO;
 
-          RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
-            -H "Authorization: Bearer $OPENROUTER_API_KEY" \
-            -H "Content-Type: application/json" \
-            -H "HTTP-Referer: https://github.com/${{ github.repository }}" \
-            -H "X-Title: AI Issue Reply" \
-            -d @request.json)
+const isComment = process.env.GITHUB_EVENT_NAME === 'issue_comment';
+const commentBody = isComment ? eventData.comment.body : null;
+const commentAuthor = isComment ? eventData.comment.user.login : issueData.user.login;
 
-          echo "$RESPONSE" > response.json
-          cat response.json | jq .
+const messages = [
+  {
+    role: 'system',
+    content: 'You are a helpful AI assistant. Issue title is the topic, body is context, comments are conversation history. Keep responses concise and helpful.'
+  }
+];
 
-      - name: Reply to issue
-        if: ${{ success() }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: ${{ env.ISSUE_NUMBER }}
-        run: |
-          AI_REPLY=$(jq -r '.choices[0].message.content // empty' response.json)
-          if [ -n "$AI_REPLY" ] && [ "$AI_REPLY" != "null" ]; then
-            AUTHOR=$(if [ "${{ github.event_name }}" = "issue_comment" ]; then echo "${{ github.event.comment.user.login }}"; else echo "${{ github.event.issue.user.login }}"; fi)
-            gh issue comment $ISSUE_NUMBER --body "@$AUTHOR $AI_REPLY"
-          fi
+if (isComment && issueData.comments && issueData.comments.length > 0) {
+  const history = issueData.comments
+    .map(c => `**${c.author.login}:** ${c.body}`)
+    .join('\n');
+  messages.push({
+    role: 'user',
+    content: `Issue Title: ${issueData.title}\n\n---Conversation History---\n${history}\n\n---\nNew message from ${commentAuthor}:\n${commentBody}`
+  });
+} else {
+  messages.push({
+    role: 'user',
+    content: `Issue Title: ${issueData.title}\n\nIssue Body:\n${issueData.body || '(empty)'}`
+  });
+}
+
+const requestBody = {
+  model: 'openrouter/free',
+  messages
+};
+
+const data = JSON.stringify(requestBody);
+
+const options = {
+  hostname: 'openrouter.ai',
+  path: '/api/v1/chat/completions',
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(data),
+    'HTTP-Referer': `https://github.com/${repo}`,
+    'X-Title': 'AI Issue Reply'
+  }
+};
+
+const result = await new Promise((resolve, reject) => {
+  const req = https.request(options, (res) => {
+    let body = '';
+    res.on('data', (chunk) => body += chunk);
+    res.on('end', () => resolve(body));
+  });
+  req.on('error', reject);
+  req.write(data);
+  req.end();
+});
+
+const response = JSON.parse(result);
+console.log('Response:', JSON.stringify(response, null, 2));
+
+const aiReply = response.choices?.[0]?.message?.content;
+if (aiReply) {
+  const { execSync } = require('child_process');
+  const cmd = `gh issue comment ${issueNumber} --body "@${commentAuthor} ${aiReply}"`;
+  console.log('Executing:', cmd);
+  execSync(cmd, { env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN } });
+  console.log('Reply posted!');
+}
+EOF
+
+          node index.js
