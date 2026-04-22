@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   ai-reply:
-    if: ${{ github.event.issue && contains(github.event.comment.body, '/ai') }}
+    if: ${{ github.event.issue }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -24,12 +24,25 @@ jobs:
           echo "ISSUE_TITLE=$ISSUE_TITLE" >> $GITHUB_ENV
           echo "ISSUE_BODY=$ISSUE_BODY" >> $GITHUB_ENV
 
+      - name: Get issue comments history
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        id: history
+        run: |
+          COMMENTS=$(gh issue view $ISSUE_NUMBER --json comments --jq '.comments[] | "**\(.author.login):** \(.body)"' | tac)
+          echo "COMMENTS<<EOF" >> $GITHUB_ENV
+          echo "$COMMENTS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
       - name: Call OpenRouter API
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           ISSUE_TITLE: ${{ env.ISSUE_TITLE }}
           ISSUE_BODY: ${{ env.ISSUE_BODY }}
           COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+          COMMENTS: ${{ env.COMMENTS }}
         run: |
           RESPONSE=$(curl -s https://openrouter.ai/api/v1/chat/completions \
             -H "Authorization: Bearer $OPENROUTER_API_KEY" \
@@ -39,16 +52,16 @@ jobs:
             -d '{
               "model": "openrouter/free",
               "messages": [
-                {"role": "system", "content": "You are a helpful assistant that helps answer GitHub issue questions. Keep responses concise and helpful."},
-                {"role": "user", "content": "Issue Title: '"$ISSUE_TITLE"'\n\nIssue Body:\n'"$ISSUE_BODY"'\n\nUser Question:\n'"$COMMENT_BODY"'"}
+                {"role": "system", "content": "You are a helpful AI assistant that helps answer GitHub issue questions. Provide concise and helpful responses."},
+                {"role": "user", "content": "Issue Title: '"$ISSUE_TITLE"'\n\nIssue Body:\n'"$ISSUE_BODY"'\n\n---Conversation History:---\n'"${COMMENTS}"'\n\n---\nNew Comment by '"$COMMENT_AUTHOR"':\n'"$COMMENT_BODY"'"}
               ]
             }')
 
-          AI_REPLY=$(echo $RESPONSE | jq -r '.choices[0].message.content')
+          AI_REPLY=$(echo $RESPONSE | jq -r '.choices[0].message.content // empty')
           echo "AI_REPLY=$AI_REPLY" >> $GITHUB_ENV
 
       - name: Reply to issue
-        if: ${{ env.AI_REPLY != '' && env.AI_REPLY != 'null' }}
+        if: ${{ env.AI_REPLY != '' && env.AI_REPLY != 'null' && env.AI_REPLY != empty }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ISSUE_NUMBER: ${{ github.event.issue.number }}
