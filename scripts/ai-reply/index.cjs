@@ -9,8 +9,10 @@ async function main() {
   const repo = process.env.REPO;
 
   const isComment = process.env.GITHUB_EVENT_NAME === 'issue_comment';
-  const commentBody = isComment ? eventData.comment.body : null;
-  const commentAuthor = isComment ? eventData.comment.user.login : issueData.user.login;
+  const commentBody = isComment && eventData.comment ? eventData.comment.body : null;
+  const commentAuthor = isComment && eventData.comment
+    ? eventData.comment.user.login
+    : issueData.user.login;
 
   const messages = [
     {
