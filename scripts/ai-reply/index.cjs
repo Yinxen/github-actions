@@ -12,7 +12,7 @@ async function main() {
   const commentBody = isComment && eventData.comment ? eventData.comment.body : null;
   const commentAuthor = isComment && eventData.comment
     ? eventData.comment.user.login
-    : issueData.user.login;
+    : (eventData.sender ? eventData.sender.login : 'user');
 
   const messages = [
     {
