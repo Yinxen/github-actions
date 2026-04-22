@@ -1,5 +1,6 @@
 const https = require('https');
 const fs = require('fs');
+const { execSync } = require('child_process');
 
 const issueData = JSON.parse(fs.readFileSync('./issue.json', 'utf8'));
 const eventData = JSON.parse(fs.readFileSync('./event.json', 'utf8'));
@@ -68,9 +69,8 @@ console.log('Response:', JSON.stringify(response, null, 2));
 
 const aiReply = response.choices?.[0]?.message?.content;
 if (aiReply) {
-  const { execSync } = require('child_process');
   const cmd = `gh issue comment ${issueNumber} --body "@${commentAuthor} ${aiReply}"`;
   console.log('Executing:', cmd);
-  execSync(cmd, { env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN } });
+  execSync(cmd, { env: { ...process.env, GITHUB_TOKEN: process.env.GH_TOKEN } });
   console.log('Reply posted!');
 }
