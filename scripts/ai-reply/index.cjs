@@ -72,7 +72,9 @@ async function main() {
 
   const aiReply = response.choices?.[0]?.message?.content;
   if (aiReply) {
-    const cmd = `gh issue comment ${issueNumber} --body "@${commentAuthor} ${aiReply}"`;
+    const fullReply = `@${commentAuthor} ${aiReply}`;
+    fs.writeFileSync('reply_body.txt', fullReply);
+    const cmd = `gh issue comment ${issueNumber} --body-file reply_body.txt`;
     console.log('Executing:', cmd);
     execSync(cmd, { env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN } });
     console.log('Reply posted!');
